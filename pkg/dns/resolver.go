@@ -22,12 +22,119 @@ func get_root_servers() []net.IP {
 	return ip_addies
 }
 
-func HandlePacket(pc net.PacketConn, addr net.Addr, buf []byte) error {
-	return handlePacket(pc, addr, buf)
+func HandlePacket(pc net.PacketConn, addr net.Addr, buf []byte) {
+	if err := handlePacket(pc, addr, buf); err != nil {
+		fmt.Printf("HandlePacket error: %s", err)
+	}
 }
 
 func handlePacket(pc net.PacketConn, addr net.Addr, buf []byte) error {
-	return fmt.Errorf("Pass")
+	var (
+		err             error
+		p               dnsmessage.Parser
+		q               dnsmessage.Question
+		response        *dnsmessage.Message
+		header          dnsmessage.Header
+		packed_response []byte
+	)
+
+	if header, err = p.Start(buf); err != nil {
+		log.Println("parser.Start() error")
+		return err
+	}
+
+	if q, err = p.Question(); err != nil {
+		log.Println("p.Question() error")
+		return err
+	}
+
+	if response, err = dnsQuery(get_root_servers(), q); err != nil {
+		return err
+	}
+
+	response.Header.ID = header.ID
+	if packed_response, err = response.Pack(); err != nil {
+		return err
+	}
+
+	if _, err := pc.WriteTo(packed_response, addr); err != nil {
+		return err
+	}
+	return nil
+}
+
+func dnsQuery(servers []net.IP, question dnsmessage.Question) (*dnsmessage.Message, error) {
+	for i := 0; i < 3; i++ {
+		var (
+			p                        *dnsmessage.Parser
+			h                        *dnsmessage.Header
+			authorities, additionals []dnsmessage.Resource
+			err                      error
+		)
+
+		if p, h, err = outgoingDnsQuery(servers, question); err != nil {
+			fmt.Printf("outgoingDnsQuery() error --> %v", err)
+			continue
+		}
+
+		if h.Authoritative {
+			var answers []dnsmessage.Resource
+			if answers, err = p.AllAnswers(); err != nil {
+				return &dnsmessage.Message{
+					Header: dnsmessage.Header{
+						RCode: dnsmessage.RCodeServerFailure,
+					},
+				}, err
+			}
+
+			return &dnsmessage.Message{
+				Header: dnsmessage.Header{
+					Response: true,
+				},
+				Answers: answers,
+			}, nil
+		}
+
+		if authorities, err = p.AllAuthorities(); err != nil {
+			fmt.Printf("p.AllAuthorities() error %v", err)
+			return nil, err
+		}
+
+		if len(authorities) == 0 {
+			return &dnsmessage.Message{
+				Header: dnsmessage.Header{
+					RCode: dnsmessage.RCodeNameError,
+				},
+			}, nil
+		}
+
+		var nameservers []string
+		for _, name := range authorities {
+			nameservers = append(nameservers, name.Header.Name.String())
+		}
+
+		if additionals, err = p.AllAdditionals(); err != nil && err != dnsmessage.ErrSectionDone {
+			fmt.Printf("p.AllAdditionals() error %v", err)
+			continue
+		}
+
+    var has_ip bool = false
+    var new_servers []net.IP
+
+    for _, nameserver := range nameservers {
+      for _, packet := range additionals {
+        if(nameserver == packet.Header.Name.String()) {
+          has_ip = true
+          new_servers = append(new_servers, packet.Body.)
+        }
+      }
+    }
+
+		}
+
+		// NOTE: Case when the additionals will have no ips
+	}
+	return dnsmessage.Message{}, nil
 }
 
 func outgoingDnsQuery(servers []net.IP, question dnsmessage.Question) (*dnsmessage.Parser, *dnsmessage.Header, error) {
@@ -72,48 +179,45 @@ func outgoingDnsQuery(servers []net.IP, question dnsmessage.Question) (*dnsmessa
 	}
 
 	for _, server := range servers {
-		conn, err = net.Dial("udp", server.String())
+		conn, err = net.Dial("udp", server.String()+":53")
 		if err != nil {
 			log.Printf("conn fail for %s", server.String())
 			continue
 		}
-	}
 
-	if conn == nil {
-		return nil, nil, fmt.Errorf("no connections found for \n%+v", servers)
-	}
-	defer conn.Close()
+		defer conn.Close()
+		if n, err = conn.Write(packed_message); err != nil {
+			return nil, nil, fmt.Errorf("usage conn.Write() --> %v", err)
+		}
 
-	if n, err = conn.Write(packed_message); err != nil {
-		return nil, nil, fmt.Errorf("usage conn.Write() --> %v", err)
-	}
+		if n != len(packed_message) {
+			log.Println("write unsuccessful")
+			return nil, nil, nil
+		}
 
-	if n != len(packed_message) {
-		log.Println("write unsuccessful")
-		return nil, nil, nil
-	}
+		answer = make([]byte, 512)
+		if n, err = bufio.NewReader(conn).Read(answer); err != nil {
+			return nil, nil, err
+		}
 
-	answer = make([]byte, 512)
-	if n, err = bufio.NewReader(conn).Read(answer); err != nil {
-		return nil, nil, err
-	}
+		if header, err = p.Start(answer[:n]); err != nil {
+			log.Println("usage parser.Start()")
+			return nil, nil, err
+		}
 
-	if header, err = p.Start(answer[:n]); err != nil {
-		log.Println("usage parser.Start()")
-		return nil, nil, err
-	}
+		if resp_ques, err = p.AllQuestions(); err != nil {
+			log.Println("p.AllQuestions() error")
+			return nil, nil, err
+		}
 
-	if resp_ques, err = p.AllQuestions(); err != nil {
-		log.Println("p.AllQuestions() error")
-		return nil, nil, err
-	}
+		if len(message.Questions) != len(resp_ques) {
+			return nil, nil, fmt.Errorf("response question length not equal to request length")
+		}
 
-	if len(message.Questions) != len(resp_ques) {
-		return nil, nil, fmt.Errorf("response question length not equal to request length")
+		if err = p.SkipAllQuestions(); err != nil {
+			return nil, nil, fmt.Errorf("usage p.SkipAllQuestions() error %v", err)
+		}
+		return &p, &header, nil
 	}
-
-	if err = p.SkipAllQuestions(); err != nil {
-		return nil, nil, fmt.Errorf("usage p.SkipAllQuestions() error %v", err)
-	}
-	return &p, &header, nil
+	return nil, nil, fmt.Errorf("No connection found in %+v", servers)
 }
