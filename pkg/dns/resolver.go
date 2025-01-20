@@ -73,8 +73,7 @@ func dnsQuery(servers []net.IP, question dnsmessage.Question) (*dnsmessage.Messa
 		)
 
 		if p, h, err = outgoingDnsQuery(servers, question); err != nil {
-			fmt.Printf("outgoingDnsQuery() error --> %v", err)
-			continue
+			return nil, err
 		}
 
 		if h.Authoritative {
@@ -95,8 +94,12 @@ func dnsQuery(servers []net.IP, question dnsmessage.Question) (*dnsmessage.Messa
 			}, nil
 		}
 
+		if err = p.SkipAllAnswers(); err != nil {
+			fmt.Println("SkipAllAnswers() error")
+			return nil, err
+		}
+
 		if authorities, err = p.AllAuthorities(); err != nil {
-			fmt.Printf("p.AllAuthorities() error %v", err)
 			return nil, err
 		}
 
@@ -109,8 +112,11 @@ func dnsQuery(servers []net.IP, question dnsmessage.Question) (*dnsmessage.Messa
 		}
 
 		var nameservers []string
+
 		for _, name := range authorities {
-			nameservers = append(nameservers, name.Header.Name.String())
+			if name.Header.Type == dnsmessage.TypeNS {
+				nameservers = append(nameservers, name.Body.(*dnsmessage.NSResource).NS.String())
+			}
 		}
 
 		if additionals, err = p.AllAdditionals(); err != nil && err != dnsmessage.ErrSectionDone {
@@ -118,23 +124,50 @@ func dnsQuery(servers []net.IP, question dnsmessage.Question) (*dnsmessage.Messa
 			continue
 		}
 
-    var has_ip bool = false
-    var new_servers []net.IP
+		var has_ip bool
+		servers = []net.IP{}
 
-    for _, nameserver := range nameservers {
-      for _, packet := range additionals {
-        if(nameserver == packet.Header.Name.String()) {
-          has_ip = true
-          new_servers = append(new_servers, packet.Body.)
-        }
-      }
-    }
-
+		for _, packet := range additionals {
+			if packet.Header.Type == dnsmessage.TypeA {
+				for _, name := range nameservers {
+					if packet.Header.Name.String() == name {
+						has_ip = true
+						servers = append(servers, packet.Body.(*dnsmessage.AResource).A[:])
+					}
+				}
+			}
 		}
 
 		// NOTE: Case when the additionals will have no ips
+		if !has_ip {
+			for _, name := range nameservers {
+				m, err := dnsQuery(get_root_servers(), dnsmessage.Question{Name: dnsmessage.MustNewName(name)})
+
+				if err != nil {
+					fmt.Printf("warning: lookup of nameserver %s failed: %err\n", name, err)
+				} else {
+
+					has_ip = true
+					for _, answer := range m.Answers {
+						if answer.Header.Type == dnsmessage.TypeA {
+							servers = append(servers, answer.Body.(*dnsmessage.AResource).A[:])
+						}
+					}
+
+				}
+
+				if has_ip {
+					break
+				}
+			}
+		}
 	}
-	return dnsmessage.Message{}, nil
+
+	return &dnsmessage.Message{
+		Header: dnsmessage.Header{
+			RCode: dnsmessage.RCodeServerFailure,
+		},
+	}, nil
 }
 
 func outgoingDnsQuery(servers []net.IP, question dnsmessage.Question) (*dnsmessage.Parser, *dnsmessage.Header, error) {
